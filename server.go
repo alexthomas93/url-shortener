@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
 
 	"database/sql"
@@ -54,7 +55,6 @@ func shortenURL(c echo.Context) error {
 		c.Logger().Errorf("POST /api/shorten DB error: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to store URL"})
 	}
-	c.Logger().Infof("POST /api/shorten URL:%s ShortCode:%s", req.URL, shortCode)
 	host := c.Request().Host
 	redirectURL := fmt.Sprintf("http://%s/%s", host, shortCode)
 	response := ShortenResponse{
@@ -84,7 +84,6 @@ func deleteURL(c echo.Context) error {
 		c.Logger().Infof("DELETE /api/url/%s No rows affected", code)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "URL not found"})
 	}
-	c.Logger().Infof("DELETE /api/url/%s", code)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -100,7 +99,6 @@ func redirectURL(c echo.Context) error {
 		c.Logger().Errorf("GET /%s DB error: %v", code, err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to retrieve URL"})
 	}
-	c.Logger().Infof("GET /%s URL:%s", code, url)
 	return c.Redirect(http.StatusFound, url)
 }
 
@@ -109,6 +107,11 @@ func main() {
 	defer DB.Close()
 	e := echo.New()
 	e.Logger.SetLevel(log.INFO)
+	e.Use(middleware.RequestID())
+	e.Use(middleware.BodyLimit("2M"))
+	e.Use(middleware.Secure())
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
 	api := e.Group("/api")
 	api.POST("/shorten", shortenURL)
 	api.DELETE("/url/:code", deleteURL)
