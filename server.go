@@ -42,6 +42,7 @@ func initDB() {
 }
 
 func shortenURL(c echo.Context) error {
+	ctx := c.Request().Context()
 	var req ShortenRequest
 	err := c.Bind(&req)
 	if err != nil {
@@ -50,7 +51,7 @@ func shortenURL(c echo.Context) error {
 	}
 	hash := sha256.Sum256([]byte(req.URL))
 	shortCode := base64.RawURLEncoding.EncodeToString(hash[:6])
-	result, err := DB.Exec("INSERT OR IGNORE INTO urls (code, url) VALUES (?, ?)", shortCode, req.URL)
+	result, err := DB.ExecContext(ctx, "INSERT OR IGNORE INTO urls (code, url) VALUES (?, ?)", shortCode, req.URL)
 	if err != nil {
 		c.Logger().Errorf("POST /api/shorten DB error: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
@@ -78,8 +79,9 @@ func shortenURL(c echo.Context) error {
 }
 
 func deleteURL(c echo.Context) error {
+	ctx := c.Request().Context()
 	code := c.Param("code")
-	result, err := DB.Exec("DELETE FROM urls WHERE code = ?", code)
+	result, err := DB.ExecContext(ctx, "DELETE FROM urls WHERE code = ?", code)
 	if err != nil {
 		c.Logger().Errorf("DELETE /api/%s DB error: %v", code, err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to delete URL"})
@@ -101,8 +103,9 @@ func deleteURL(c echo.Context) error {
 }
 
 func redirectURL(c echo.Context) error {
+	ctx := c.Request().Context()
 	code := c.Param("code")
-	row := DB.QueryRow("SELECT url FROM urls WHERE code = ?", code)
+	row := DB.QueryRowContext(ctx, "SELECT url FROM urls WHERE code = ?", code)
 	var url string
 	if err := row.Scan(&url); err != nil {
 		if err == sql.ErrNoRows {
