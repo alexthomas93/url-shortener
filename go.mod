@@ -6,6 +6,7 @@ require (
 	github.com/labstack/echo/v4 v4.13.4
 	github.com/labstack/gommon v0.4.2
 	github.com/mattn/go-sqlite3 v1.14.28
+	github.com/teris-io/shortid v0.0.0-20220617161101-71ec9f2aa569
 )
 
 require (

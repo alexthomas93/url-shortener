@@ -4,19 +4,39 @@ import (
 	"fmt"
 	"net/http"
 
-	"crypto/sha256"
-	"encoding/base64"
-
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
 
 	"database/sql"
 
+	"github.com/teris-io/shortid"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var DB *sql.DB
+type Server struct {
+	E  *echo.Echo
+	DB *sql.DB
+}
+
+func NewServer(db *sql.DB) *Server {
+	e := echo.New()
+	server := &Server{
+		E:  e,
+		DB: db,
+	}
+	e.Use(middleware.RequestID())
+	e.Use(middleware.BodyLimit("2M"))
+	e.Use(middleware.Secure())
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	api := e.Group("/api")
+	api.POST("/shorten", server.shortenURL)
+	api.DELETE("/:code", server.deleteURL)
+	e.GET("/:code", server.redirectURL)
+	return server
+}
 
 type ShortenRequest struct {
 	URL string `json:"url" validate:"required,url"`
@@ -27,21 +47,22 @@ type ShortenResponse struct {
 	Code string `json:"code"`
 }
 
-func initDB() {
+func initDB(dataSourceName string) *sql.DB {
 	var err error
-	DB, err = sql.Open("sqlite3", "./app.db")
+	db, err := sql.Open("sqlite3", dataSourceName)
 	if err != nil {
 		log.Fatalf("Error opening database: %v", err)
 	}
 	query := "CREATE TABLE IF NOT EXISTS urls (code TEXT PRIMARY KEY NOT NULL, url TEXT NOT NULL);"
-	_, err = DB.Exec(query)
+	_, err = db.Exec(query)
 	if err != nil {
 		log.Fatalf("Error creating table: %v", err)
 	}
 	log.Info("Database initialised")
+	return db
 }
 
-func shortenURL(c echo.Context) error {
+func (s *Server) shortenURL(c echo.Context) error {
 	ctx := c.Request().Context()
 	var req ShortenRequest
 	err := c.Bind(&req)
@@ -49,9 +70,24 @@ func shortenURL(c echo.Context) error {
 		c.Logger().Errorf("POST /api/shorten Bind error: %v", err)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request format"})
 	}
-	hash := sha256.Sum256([]byte(req.URL))
-	shortCode := base64.RawURLEncoding.EncodeToString(hash[:6])
-	result, err := DB.ExecContext(ctx, "INSERT OR IGNORE INTO urls (code, url) VALUES (?, ?)", shortCode, req.URL)
+	host := c.Request().Host
+	var existingCode string
+	err = s.DB.QueryRowContext(ctx, "SELECT code FROM urls WHERE url = ?", req.URL).Scan(&existingCode)
+	if err == nil {
+		c.Logger().Infof("POST /api/shorten URL already shortened: %s", req.URL)
+		redirectURL := fmt.Sprintf("http://%s/%s", host, existingCode)
+		response := ShortenResponse{
+			URL:  redirectURL,
+			Code: existingCode,
+		}
+		return c.JSON(http.StatusOK, response)
+	}
+	shortCode, err := shortid.Generate()
+	if err != nil {
+		c.Logger().Errorf("POST /api/shorten shortid error: %v", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to generate short code"})
+	}
+	result, err := s.DB.ExecContext(ctx, "INSERT OR IGNORE INTO urls (code, url) VALUES (?, ?)", shortCode, req.URL)
 	if err != nil {
 		c.Logger().Errorf("POST /api/shorten DB error: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
@@ -60,28 +96,18 @@ func shortenURL(c echo.Context) error {
 		c.Logger().Errorf("POST /api/shorten No result returned from DB")
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
 	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		c.Logger().Errorf("POST /api/shorten RowsAffected error: %v", err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Database error"})
-	}
-	host := c.Request().Host
 	redirectURL := fmt.Sprintf("http://%s/%s", host, shortCode)
 	response := ShortenResponse{
 		URL:  redirectURL,
 		Code: shortCode,
 	}
-	if rowsAffected == 0 {
-		c.Logger().Infof("POST /api/shorten URL already shortened: %s", req.URL)
-		return c.JSON(http.StatusOK, response)
-	}
 	return c.JSON(http.StatusCreated, response)
 }
 
-func deleteURL(c echo.Context) error {
+func (s *Server) deleteURL(c echo.Context) error {
 	ctx := c.Request().Context()
 	code := c.Param("code")
-	result, err := DB.ExecContext(ctx, "DELETE FROM urls WHERE code = ?", code)
+	result, err := s.DB.ExecContext(ctx, "DELETE FROM urls WHERE code = ?", code)
 	if err != nil {
 		c.Logger().Errorf("DELETE /api/%s DB error: %v", code, err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to delete URL"})
@@ -102,10 +128,10 @@ func deleteURL(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func redirectURL(c echo.Context) error {
+func (s *Server) redirectURL(c echo.Context) error {
 	ctx := c.Request().Context()
 	code := c.Param("code")
-	row := DB.QueryRowContext(ctx, "SELECT url FROM urls WHERE code = ?", code)
+	row := s.DB.QueryRowContext(ctx, "SELECT url FROM urls WHERE code = ?", code)
 	var url string
 	if err := row.Scan(&url); err != nil {
 		if err == sql.ErrNoRows {
@@ -119,19 +145,10 @@ func redirectURL(c echo.Context) error {
 }
 
 func main() {
-	initDB()
-	defer DB.Close()
-	e := echo.New()
-	e.Logger.SetLevel(log.INFO)
-	e.Use(middleware.RequestID())
-	e.Use(middleware.BodyLimit("2M"))
-	e.Use(middleware.Secure())
-	e.Use(middleware.Logger())
-	e.Use(middleware.Recover())
-	api := e.Group("/api")
-	api.POST("/shorten", shortenURL)
-	api.DELETE("/:code", deleteURL)
-	e.GET("/:code", redirectURL)
-	e.Logger.Info("Starting server on :1323")
-	e.Logger.Fatal(e.Start(":1323"))
+	db := initDB("./app.db")
+	defer db.Close()
+	server := NewServer(db)
+	server.E.Logger.SetLevel(log.INFO)
+	server.E.Logger.Info("Starting server on :1323")
+	server.E.Logger.Fatal(server.E.Start(":1323"))
 }
